@@ -31,30 +31,48 @@ def _load_state() -> Dict:
                 if "users" not in state:
                         state["users"] = {}
                 
-                # Migration: add category and price to existing numbers (deterministic and persistent)
+                # Migration: add category, price, and type to existing numbers (deterministic and persistent)
                 migration_needed = False
                 for num in state.get("numbers", []):
-                        if "category" not in num or "price" not in num:
+                        if "category" not in num or "price" not in num or "type" not in num:
                                 migration_needed = True
-                                # Assign category based on number pattern or use hash for deterministic assignment
-                                if "eSIM" in num.get("number", ""):
-                                        num["category"] = "esim"
-                                        # Use hash for deterministic price assignment
-                                        price_hash = hash(num.get("number", "")) % 21 + 10  # 10-30
-                                        num["price"] = price_hash
-                                elif "PHYS" in num.get("number", ""):
-                                        num["category"] = "physical"
-                                        price_hash = hash(num.get("number", "")) % 7 + 4  # 4-10
-                                        num["price"] = price_hash
-                                else:
-                                        # Legacy numbers: use hash for deterministic category and price
-                                        num_hash = hash(num.get("number", ""))
-                                        category = "esim" if num_hash % 2 == 0 else "physical"
-                                        num["category"] = category
-                                        if category == "esim":
-                                                num["price"] = num_hash % 21 + 10  # 10-30
+                                number_str = num.get("number", "")
+                                
+                                # Assign category and type based on number pattern
+                                if "+888" in number_str:
+                                        num["category"] = "anonymous"
+                                        num["type"] = "rent"
+                                        num["price"] = 25
+                                elif "+7" in number_str or "+380" in number_str:
+                                        # Russian/Ukrainian numbers - could be esim or physical
+                                        # Use hash for deterministic assignment
+                                        num_hash = hash(number_str)
+                                        if num_hash % 2 == 0:
+                                                num["category"] = "esim"
+                                                num["price"] = 15
                                         else:
-                                                num["price"] = num_hash % 7 + 4  # 4-10
+                                                num["category"] = "physical"
+                                                num["price"] = 8
+                                        num["type"] = "sale"
+                                elif "eSIM" in number_str:
+                                        num["category"] = "esim"
+                                        num["type"] = "sale"
+                                        num["price"] = 15
+                                elif "PHYS" in number_str:
+                                        num["category"] = "physical"
+                                        num["type"] = "sale"
+                                        num["price"] = 8
+                                else:
+                                        # Legacy numbers: use hash for deterministic assignment
+                                        num_hash = hash(number_str)
+                                        category = "anonymous" if num_hash % 3 == 0 else ("esim" if num_hash % 2 == 0 else "physical")
+                                        num["category"] = category
+                                        if category == "anonymous":
+                                                num["type"] = "rent"
+                                                num["price"] = 25
+                                        else:
+                                                num["type"] = "sale"
+                                                num["price"] = 15 if category == "esim" else 8
                 
                 # Save state immediately after migration to persist changes
                 if migration_needed:

@@ -16,15 +16,23 @@ GREEN_CIRCLE = "🟢"
 
 def category_keyboard() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📱 eSIM", callback_data="cat:esim")],
-                [InlineKeyboardButton(text="📞 Физические номера", callback_data="cat:physical")],
+                [InlineKeyboardButton(text="🎭 Анонимные номера", callback_data="cat:anonymous")],
+                [InlineKeyboardButton(text="📱 eSIM (Продажа)", callback_data="cat:esim")],
+                [InlineKeyboardButton(text="📞 Физические SIM (Продажа)", callback_data="cat:physical")],
         ])
 
 
 def numbers_inline_keyboard(numbers: List[Dict]) -> InlineKeyboardMarkup:
         rows = []
         for item in numbers:
-                price_str = f" — ${item.get('price', '?')}/мес"
+                num_type = item.get('type', 'rent')
+                price = item.get('price', '?')
+                
+                if num_type == 'sale':
+                        price_str = f" — ${price}"
+                else:
+                        price_str = f" — ${price}/мес"
+                
                 label = f"{RED_CIRCLE if item['status']=='busy' else GREEN_CIRCLE} {item['number']}{price_str}"
                 rows.append([
                         InlineKeyboardButton(text=label, callback_data=f"num:{item['number']}")

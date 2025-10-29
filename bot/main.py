@@ -3,7 +3,7 @@ import asyncio
 from datetime import datetime
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 # removed config import to avoid .env RuntimeError
 from .keyboards import MAIN_KB, numbers_inline_keyboard, durations_keyboard, RED_CIRCLE, GREEN_CIRCLE, payment_keyboard, promo_choice_keyboard, profile_keyboard, category_keyboard
 from . import storage
@@ -56,19 +56,24 @@ async def help_cmd(message: Message):
                 "Shadow Numbers — сервис аренды анонимных номеров Telegram.\n\n"
                 "Возможности:\n"
                 f"- Номера: наглядный список со статусами ({RED_CIRCLE} — занято, {GREEN_CIRCLE} — свободно).\n"
-		"- Две категории: 📱 eSIM ($10-$30/мес) и 📞 Физические номера ($4-$10/мес).\n"
-		"- Аренда: доступные сроки — 1, 3, 6 или 12 месяцев.\n"
-		"- Тарифы: итоговая стоимость = цена номера × количество месяцев.\n"
-		"- Управление: раздел '👤 Профиль' → '📋 Мои аренды' — просмотр активных аренд.\n"
+		"🎭 Анонимные номера — аренда ($25/мес)
+		"📱 eSIM — продажа ($15)
+		"📞 Физические SIM — продажа ($8)
+
+		"Возможности:
+		f"- Номера: наглядный список со статусами ({RED_CIRCLE} — занято, {GREEN_CIRCLE} — свободно).\n"
+		"- Аренда: доступные сроки — 1, 3, 6 или 12 месяцев (только для анонимных номеров).\n"
+		"- Продажа: одноразовая покупка номера (eSIM и Физические SIM).\n"
+		"- Управление: раздел '👤 Профиль' → '📋 Мои аренды'.\n"
 		"- Оплата: безопасные платежи в USDT через Crypto Pay.\n"
 		"- Промокоды: скидки на аренду (вводятся при оплате).\n\n"
 		"Порядок действий:\n"
 		"1) Откройте раздел '📱 Номера' и выберите категорию.\n"
 		"2) Выберите свободный номер (цена указана рядом).\n"
-		"3) Укажите срок аренды и введите промокод (опционально).\n"
+		"3) Для аренды выберите срок, для покупки — нажмите 'Купить'.\n"
 		"4) Оплатите счёт (USDT) по сгенерированной ссылке.\n"
 		"5) Нажмите 'Я оплатил' — бот автоматически подтвердит оплату.\n\n"
-        )
+		"Поддержка: в случае вопросов ответьте на данное сообщение — оператор свяжется с вами."
         await message.answer(text)
 
 
@@ -82,13 +87,19 @@ async def select_category(callback: CallbackQuery):
         category = callback.data.split(":", 1)[1]
         numbers = storage.list_numbers(category=category)
         
-        category_name = "eSIM" if category == "esim" else "Физические номера"
+        category_names = {
+                "anonymous": "🎭 Анонимные номера (Аренда)",
+                "esim": "📱 eSIM (Продажа)",
+                "physical": "📞 Физические SIM (Продажа)"
+        }
+        category_name = category_names.get(category, category)
+        
         if not numbers:
                 await callback.answer(f"В категории '{category_name}' пока нет номеров", show_alert=True)
                 return
         
         await callback.message.edit_text(
-                f"📱 {category_name}\n\nВыберите номер:",
+                f"{category_name}\n\nВыберите номер:",
                 reply_markup=numbers_inline_keyboard(numbers)
         )
         await callback.answer()
@@ -109,12 +120,84 @@ async def pick_number(callback: CallbackQuery):
                 await callback.answer()
                 return
         
-        monthly_price = item.get("price", 25)
+        num_type = item.get("type", "rent")
+        price = item.get("price", 25)
+        
+        if num_type == "sale":
+                # For sale - show buy button
+                buy_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text=f"💳 Купить за ${price}", callback_data=f"buy:{number}")]
+                ])
+                await callback.message.edit_text(
+                        f"Вы выбрали {GREEN_CIRCLE} {number}\n"
+                        f"Цена: ${price}\n\n"
+                        "Нажмите кнопку для покупки:",
+                        reply_markup=buy_keyboard,
+                )
+        else:
+                # For rent - show duration options
+                await callback.message.edit_text(
+                        f"Вы выбрали {GREEN_CIRCLE} {number}\n"
+                        f"Цена: ${price}/мес\n\n"
+                        "Выберите срок аренды:",
+                        reply_markup=durations_keyboard(number, price),
+                )
+        await callback.answer()
+
+
+@router.callback_query(F.data.startswith("buy:"))
+async def buy_number(callback: CallbackQuery):
+        number = callback.data.split(":", 1)[1]
+        item = storage.get_number(number)
+        if not item:
+                await callback.answer("Номер не найден", show_alert=True)
+                return
+        if item["status"] == "busy":
+                await callback.answer("Номер уже продан", show_alert=True)
+                return
+        
+        price = item.get("price", 15)
+        
+        # For sale, we don't need promo codes - just process payment directly
+        if not crypto_client:
+                # Fallback without crypto: mark as sold
+                storage.set_number_status(number, "busy")
+                await callback.message.edit_text(
+                        f"✅ Номер {number} успешно куплен!\n"
+                        f"Цена: ${price}\n\n"
+                        "Ожидайте получения доступа к номеру."
+                )
+                await callback.answer()
+                return
+        
+        # Create payment for sale
+        payment_id = f"{callback.from_user.id}:{number}:sale:{int(time.time())}"
+        description = f"Покупка номера {number}"
+        
+        invoice = await crypto_client.create_invoice(amount=price, asset="USDT", description=description, payload=payment_id)
+        if not invoice:
+                await callback.answer("Не удалось создать счёт. Повторите позже.", show_alert=True)
+                return
+        
+        payment_data = {
+                "user_id": callback.from_user.id,
+                "number": number,
+                "months": 0,  # 0 for sale (not rent)
+                "price": price,
+                "invoice_id": invoice.get("invoice_id"),
+                "status": "pending",
+                "type": "sale"
+        }
+        
+        storage.create_pending_payment(payment_id, payment_data)
+        pay_url = invoice.get("pay_url") or invoice.get("bot_invoice_url")
+        
         await callback.message.edit_text(
-                f"Вы выбрали {GREEN_CIRCLE} {number}\n"
-                f"Цена: ${monthly_price}/мес\n\n"
-                "Выберите срок аренды:",
-                reply_markup=durations_keyboard(number, monthly_price),
+                f"💳 Покупка номера {number}\n"
+                f"Цена: ${price} USDT\n\n"
+                f"Ссылка на оплату: {pay_url}\n\n"
+                "После оплаты нажмите 'Я оплатил' для проверки.",
+                reply_markup=payment_keyboard(payment_id)
         )
         await callback.answer()
 
@@ -333,15 +416,30 @@ async def paid_check(callback: CallbackQuery):
         if status != "paid":
                 await callback.answer("Платёж ещё не подтверждён", show_alert=True)
                 return
-        # Activate rental
-        rental = storage.add_rental(callback.from_user.id, p["number"], int(p["months"]))
-        if rental is None:
-                await callback.answer("Номер уже занят", show_alert=True)
-                return
-        storage.set_payment_status(payment_id, "paid")
-        until_h = _format_until(rental["until"])
-        await callback.message.edit_text(
-                f"Оплата подтверждена. {p['number']} арендован до {until_h}.")
+        
+        # Check if it's a sale or rent
+        payment_type = p.get("type", "rent")
+        
+        if payment_type == "sale":
+                # For sale - mark number as sold
+                storage.set_number_status(p["number"], "busy")
+                storage.set_payment_status(payment_id, "paid")
+                await callback.message.edit_text(
+                        f"✅ Оплата подтверждена!\n"
+                        f"Номер {p['number']} успешно куплен.\n\n"
+                        "Ожидайте получения доступа к номеру."
+                )
+        else:
+                # For rent - activate rental
+                rental = storage.add_rental(callback.from_user.id, p["number"], int(p["months"]))
+                if rental is None:
+                        await callback.answer("Номер уже занят", show_alert=True)
+                        return
+                storage.set_payment_status(payment_id, "paid")
+                until_h = _format_until(rental["until"])
+                await callback.message.edit_text(
+                        f"Оплата подтверждена. {p['number']} арендован до {until_h}.")
+        
         await callback.answer()
 
 
