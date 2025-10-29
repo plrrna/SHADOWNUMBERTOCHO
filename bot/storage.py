@@ -30,6 +30,36 @@ def _load_state() -> Dict:
                         state["promocodes"] = []
                 if "users" not in state:
                         state["users"] = {}
+                
+                # Migration: add category and price to existing numbers (deterministic and persistent)
+                migration_needed = False
+                for num in state.get("numbers", []):
+                        if "category" not in num or "price" not in num:
+                                migration_needed = True
+                                # Assign category based on number pattern or use hash for deterministic assignment
+                                if "eSIM" in num.get("number", ""):
+                                        num["category"] = "esim"
+                                        # Use hash for deterministic price assignment
+                                        price_hash = hash(num.get("number", "")) % 21 + 10  # 10-30
+                                        num["price"] = price_hash
+                                elif "PHYS" in num.get("number", ""):
+                                        num["category"] = "physical"
+                                        price_hash = hash(num.get("number", "")) % 7 + 4  # 4-10
+                                        num["price"] = price_hash
+                                else:
+                                        # Legacy numbers: use hash for deterministic category and price
+                                        num_hash = hash(num.get("number", ""))
+                                        category = "esim" if num_hash % 2 == 0 else "physical"
+                                        num["category"] = category
+                                        if category == "esim":
+                                                num["price"] = num_hash % 21 + 10  # 10-30
+                                        else:
+                                                num["price"] = num_hash % 7 + 4  # 4-10
+                
+                # Save state immediately after migration to persist changes
+                if migration_needed:
+                        _save_state(state)
+                
                 return state
 
 
