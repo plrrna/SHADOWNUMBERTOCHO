@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery
 # removed config import to avoid .env RuntimeError
-from .keyboards import MAIN_KB, numbers_inline_keyboard, durations_keyboard, RED_CIRCLE, GREEN_CIRCLE, payment_keyboard
+from .keyboards import MAIN_KB, numbers_inline_keyboard, durations_keyboard, RED_CIRCLE, GREEN_CIRCLE, payment_keyboard, skip_promo_keyboard
 from . import storage
 from .prices import PRICES
 from .crypto import CryptoPay
@@ -24,6 +24,10 @@ except Exception:
 router = Router()
 
 crypto_client = CryptoPay(CRYPTO_PAY_TOKEN) if CRYPTO_PAY_TOKEN else None
+
+# Temporary storage for users waiting to enter promo code
+# Format: {user_id: {"number": str, "months": int, "price": float}}
+pending_promo_state = {}
 
 
 def _format_until(until_iso: str) -> str:
@@ -97,6 +101,76 @@ async def rent_duration(callback: CallbackQuery):
         if not price:
                 await callback.answer("Неверный срок", show_alert=True)
                 return
+        
+        # Save pending state for promo code entry
+        pending_promo_state[callback.from_user.id] = {
+                "number": number,
+                "months": months,
+                "price": price,
+        }
+        
+        # Ask for promo code
+        await callback.message.edit_text(
+                f"Вы выбрали номер {number} на {months} мес.\n"
+                f"Цена: ${price}\n\n"
+                "🎁 Есть промокод? Введите его сейчас для получения скидки.\n"
+                "Или нажмите \"Пропустить\" для продолжения без промокода.",
+                reply_markup=skip_promo_keyboard(),
+        )
+        await callback.answer()
+
+
+@router.callback_query(F.data == "skip_promo")
+async def skip_promo(callback: CallbackQuery):
+        user_id = callback.from_user.id
+        if user_id not in pending_promo_state:
+                await callback.answer("Сессия истекла. Начните заново.", show_alert=True)
+                return
+        
+        state = pending_promo_state.pop(user_id)
+        await process_payment(callback, state["number"], state["months"], state["price"], None, None)
+
+
+@router.message(F.text)
+async def handle_promo_code(message: Message):
+        user_id = message.from_user.id
+        if user_id not in pending_promo_state:
+                return
+        
+        promo_code = message.text.strip()
+        state = pending_promo_state[user_id]
+        
+        # Validate promo code
+        promo = storage.get_promocode(promo_code)
+        if not promo:
+                await message.answer(
+                        f"❌ Промокод '{promo_code}' не найден или неактивен.\n"
+                        "Попробуйте ещё раз или нажмите \"Пропустить\".",
+                        reply_markup=skip_promo_keyboard(),
+                )
+                return
+        
+        # Calculate discount
+        original_price = state["price"]
+        discount_percent = promo["percent"]
+        final_price = max(1, round(original_price * (100 - discount_percent) / 100, 2))
+        
+        # Remove from pending state
+        pending_promo_state.pop(user_id)
+        
+        await message.answer(
+                f"✅ Промокод {promo['code']} применён!\n"
+                f"Скидка: {discount_percent}%\n"
+                f"Цена без скидки: ${original_price}\n"
+                f"Цена со скидкой: ${final_price}\n\n"
+                "Создаю счёт для оплаты..."
+        )
+        
+        await process_payment_from_message(message, state["number"], state["months"], final_price, promo_code, discount_percent)
+
+
+async def process_payment(callback, number: str, months: int, final_price: float, promo_code: str = None, discount_percent: int = None):
+        """Create invoice and process payment from callback with optional promo code."""
         if not crypto_client:
                 # Fallback without crypto: instantly rent (dev/test)
                 rental = storage.add_rental(callback.from_user.id, number, months)
@@ -104,34 +178,93 @@ async def rent_duration(callback: CallbackQuery):
                         await callback.answer("Номер уже занят", show_alert=True)
                         return
                 until_h = _format_until(rental["until"])
-                await callback.message.edit_text(
-                        f"Готово! {number} арендован до {until_h}.",
-                )
+                msg_text = f"Готово! {number} арендован до {until_h}."
+                if promo_code:
+                        msg_text = f"✅ Промокод {promo_code} применён (-{discount_percent}%)!\n\n" + msg_text
+                
+                await callback.message.edit_text(msg_text)
                 await callback.answer()
                 return
+        
         # Create Crypto Pay invoice
         payment_id = f"{callback.from_user.id}:{number}:{months}:{int(time.time())}"
         description = f"Аренда {number} на {months} мес"
-        invoice = await crypto_client.create_invoice(amount=price, asset="USDT", description=description, payload=payment_id)
+        if promo_code:
+                description += f" (промокод {promo_code})"
+        
+        invoice = await crypto_client.create_invoice(amount=final_price, asset="USDT", description=description, payload=payment_id)
         if not invoice:
                 await callback.answer("Не удалось создать счёт. Повторите позже.", show_alert=True)
                 return
-        storage.create_pending_payment(payment_id, {
+        
+        payment_data = {
                 "user_id": callback.from_user.id,
                 "number": number,
                 "months": months,
-                "price": price,
+                "price": final_price,
                 "invoice_id": invoice.get("invoice_id"),
                 "status": "pending",
-        })
+        }
+        if promo_code:
+                payment_data["promo_code"] = promo_code
+                payment_data["discount_percent"] = discount_percent
+        
+        storage.create_pending_payment(payment_id, payment_data)
         pay_url = invoice.get("pay_url") or invoice.get("bot_invoice_url")
-        await callback.message.edit_text(
-                f"Оплатите {price}$ USDT за {months} мес аренды номера {number}.\n\n"
-                f"Ссылка на оплату: {pay_url}\n\n"
-                "После оплаты нажмите 'Я оплатил' для проверки.",
-                reply_markup=payment_keyboard(payment_id),
-        )
+        
+        msg_text = f"Оплатите {final_price}$ USDT за {months} мес аренды номера {number}.\n\n"
+        if promo_code:
+                msg_text = f"✅ Промокод {promo_code} применён! Скидка {discount_percent}%\n\n" + msg_text
+        msg_text += f"Ссылка на оплату: {pay_url}\n\n"
+        msg_text += "После оплаты нажмите 'Я оплатил' для проверки."
+        
+        await callback.message.edit_text(msg_text, reply_markup=payment_keyboard(payment_id))
         await callback.answer()
+
+
+async def process_payment_from_message(message: Message, number: str, months: int, final_price: float, promo_code: str = None, discount_percent: int = None):
+        """Create invoice and process payment from user message with promo code."""
+        user_id = message.from_user.id
+        
+        if not crypto_client:
+                # Fallback without crypto: instantly rent (dev/test)
+                rental = storage.add_rental(user_id, number, months)
+                if rental is None:
+                        await message.answer("❌ Номер уже занят")
+                        return
+                until_h = _format_until(rental["until"])
+                msg_text = f"✅ Готово! {number} арендован до {until_h}."
+                await message.answer(msg_text)
+                return
+        
+        # Create Crypto Pay invoice
+        payment_id = f"{user_id}:{number}:{months}:{int(time.time())}"
+        description = f"Аренда {number} на {months} мес (промокод {promo_code})"
+        
+        invoice = await crypto_client.create_invoice(amount=final_price, asset="USDT", description=description, payload=payment_id)
+        if not invoice:
+                await message.answer("❌ Не удалось создать счёт. Повторите позже.")
+                return
+        
+        payment_data = {
+                "user_id": user_id,
+                "number": number,
+                "months": months,
+                "price": final_price,
+                "invoice_id": invoice.get("invoice_id"),
+                "status": "pending",
+                "promo_code": promo_code,
+                "discount_percent": discount_percent,
+        }
+        
+        storage.create_pending_payment(payment_id, payment_data)
+        pay_url = invoice.get("pay_url") or invoice.get("bot_invoice_url")
+        
+        msg_text = f"💳 Оплатите {final_price}$ USDT за {months} мес аренды номера {number}.\n\n"
+        msg_text += f"Ссылка на оплату: {pay_url}\n\n"
+        msg_text += "После оплаты нажмите 'Я оплатил' для проверки."
+        
+        await message.answer(msg_text, reply_markup=payment_keyboard(payment_id))
 
 
 @router.callback_query(F.data.startswith("paid:"))
@@ -217,6 +350,66 @@ async def admin_rent_cmd(message: Message):
                 await message.answer("Номер не найден.")
                 return
         await message.answer(f"Оформлено владельцем. Аренда {number} до {_format_until(rental['until'])}.")
+
+
+@router.message(Command("promo_add"))
+async def promo_add_cmd(message: Message):
+        if message.from_user.id != ADMIN_ID:
+                await message.answer("Команда доступна только владельцу.")
+                return
+        parts = message.text.strip().split()
+        if len(parts) != 3:
+                await message.answer("Использование: /promo_add <КОД> <ПРОЦЕНТ>\nПример: /promo_add SALE20 20")
+                return
+        code = parts[1]
+        try:
+                percent = int(parts[2])
+        except ValueError:
+                await message.answer("Процент должен быть числом от 1 до 100.")
+                return
+        
+        promo = storage.add_promocode(code, percent, message.from_user.id)
+        if not promo:
+                await message.answer("Ошибка: промокод уже существует или процент указан неверно (1-100).")
+                return
+        
+        await message.answer(f"✅ Промокод создан:\nКод: {promo['code']}\nСкидка: {promo['percent']}%")
+
+
+@router.message(Command("promo_list"))
+async def promo_list_cmd(message: Message):
+        if message.from_user.id != ADMIN_ID:
+                await message.answer("Команда доступна только владельцу.")
+                return
+        
+        promos = storage.list_promocodes()
+        if not promos:
+                await message.answer("Промокодов пока нет.")
+                return
+        
+        lines = ["📋 Список промокодов:"]
+        for p in promos:
+                status = "✅ активен" if p.get("active", True) else "❌ отключен"
+                lines.append(f"\n• {p['code']} — {p['percent']}% ({status})")
+        
+        await message.answer("\n".join(lines))
+
+
+@router.message(Command("promo_disable"))
+async def promo_disable_cmd(message: Message):
+        if message.from_user.id != ADMIN_ID:
+                await message.answer("Команда доступна только владельцу.")
+                return
+        parts = message.text.strip().split()
+        if len(parts) != 2:
+                await message.answer("Использование: /promo_disable <КОД>")
+                return
+        
+        code = parts[1]
+        if storage.deactivate_promocode(code):
+                await message.answer(f"✅ Промокод {code.upper()} отключен.")
+        else:
+                await message.answer(f"❌ Промокод {code.upper()} не найден.")
 
 
 async def expiry_worker():
