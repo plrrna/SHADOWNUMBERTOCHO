@@ -22,11 +22,14 @@ def _load_state() -> Dict:
                         "rentals": {},  # user_id -> List[{number, until_iso}]
                         "payments": {},  # payment_id -> {user_id, number, months, price, invoice_id, status}
                         "promocodes": [],  # List[{code, percent, active, created_at, created_by}]
+                        "users": {},  # user_id -> {username, first_seen, last_seen}
                 }
         with open(STATE_FILE, "r", encoding="utf-8") as f:
                 state = json.load(f)
                 if "promocodes" not in state:
                         state["promocodes"] = []
+                if "users" not in state:
+                        state["users"] = {}
                 return state
 
 
@@ -217,3 +220,34 @@ def deactivate_promocode(code: str) -> bool:
                         _save_state(state)
                         return True
         return False
+
+
+# Users
+
+def register_user(user_id: int, username: str = None) -> Dict:
+        """Register or update user. Returns user data."""
+        state = _load_state()
+        user_key = str(user_id)
+        now = datetime.utcnow().strftime(ISO_FORMAT)
+        
+        if user_key in state["users"]:
+                # Update existing user
+                state["users"][user_key]["last_seen"] = now
+                if username:
+                        state["users"][user_key]["username"] = username
+        else:
+                # New user
+                state["users"][user_key] = {
+                        "username": username,
+                        "first_seen": now,
+                        "last_seen": now,
+                }
+        
+        _save_state(state)
+        return state["users"][user_key]
+
+
+def get_user(user_id: int) -> Optional[Dict]:
+        """Get user data."""
+        state = _load_state()
+        return state["users"].get(str(user_id))

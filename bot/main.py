@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery
 # removed config import to avoid .env RuntimeError
-from .keyboards import MAIN_KB, numbers_inline_keyboard, durations_keyboard, RED_CIRCLE, GREEN_CIRCLE, payment_keyboard, skip_promo_keyboard
+from .keyboards import MAIN_KB, numbers_inline_keyboard, durations_keyboard, RED_CIRCLE, GREEN_CIRCLE, payment_keyboard, promo_choice_keyboard, profile_keyboard
 from . import storage
 from .prices import PRICES
 from .crypto import CryptoPay
@@ -39,6 +39,10 @@ def _format_until(until_iso: str) -> str:
 
 @router.message(CommandStart())
 async def start(message: Message):
+        # Register user
+        username = message.from_user.username
+        storage.register_user(message.from_user.id, username)
+        
         await message.answer(
                 "Добро пожаловать в Shadow Numbers!\nВыберите действие ниже.",
                 reply_markup=MAIN_KB,
@@ -113,9 +117,25 @@ async def rent_duration(callback: CallbackQuery):
         await callback.message.edit_text(
                 f"Вы выбрали номер {number} на {months} мес.\n"
                 f"Цена: ${price}\n\n"
-                "🎁 Есть промокод? Введите его сейчас для получения скидки.\n"
-                "Или нажмите \"Пропустить\" для продолжения без промокода.",
-                reply_markup=skip_promo_keyboard(),
+                "🎁 Хотите использовать промокод для получения скидки?",
+                reply_markup=promo_choice_keyboard(),
+        )
+        await callback.answer()
+
+
+@router.callback_query(F.data == "enter_promo")
+async def enter_promo(callback: CallbackQuery):
+        user_id = callback.from_user.id
+        if user_id not in pending_promo_state:
+                await callback.answer("Сессия истекла. Начните заново.", show_alert=True)
+                return
+        
+        state = pending_promo_state[user_id]
+        await callback.message.edit_text(
+                f"🎁 Введите промокод для получения скидки:\n\n"
+                f"Номер: {state['number']}\n"
+                f"Срок: {state['months']} мес\n"
+                f"Цена: ${state['price']}"
         )
         await callback.answer()
 
@@ -146,7 +166,7 @@ async def handle_promo_code(message: Message):
                 await message.answer(
                         f"❌ Промокод '{promo_code}' не найден или неактивен.\n"
                         "Попробуйте ещё раз или нажмите \"Пропустить\".",
-                        reply_markup=skip_promo_keyboard(),
+                        reply_markup=promo_choice_keyboard(),
                 )
                 return
         
@@ -297,17 +317,50 @@ async def paid_check(callback: CallbackQuery):
         await callback.answer()
 
 
-@router.message(F.text == "🧾 Мои аренды")
-async def my_rentals(message: Message):
-        rentals = storage.list_rentals(message.from_user.id)
+@router.message(F.text == "👤 Профиль")
+async def profile(message: Message):
+        user_id = message.from_user.id
+        username = message.from_user.username or "Не указан"
+        
+        # Get or register user
+        user_data = storage.get_user(user_id)
+        if not user_data:
+                user_data = storage.register_user(user_id, message.from_user.username)
+        
+        # Calculate days in bot
+        first_seen = datetime.strptime(user_data["first_seen"], "%Y-%m-%dT%H:%M:%S")
+        days_in_bot = (datetime.utcnow() - first_seen).days
+        
+        # Get bot info for referral link
+        bot = await message.bot.me()
+        bot_username = bot.username
+        ref_link = f"https://t.me/{bot_username}?start={user_id}"
+        
+        profile_text = (
+                f"👤 Ваш профиль\n\n"
+                f"📝 Username: @{username}\n"
+                f"🆔 ID: {user_id}\n"
+                f"📅 Дней в боте: {days_in_bot}\n"
+                f"🔗 Реферальная ссылка:\n{ref_link}"
+        )
+        
+        await message.answer(profile_text, reply_markup=profile_keyboard())
+
+
+@router.callback_query(F.data == "my_rentals")
+async def my_rentals_callback(callback: CallbackQuery):
+        rentals = storage.list_rentals(callback.from_user.id)
         if not rentals:
-                await message.answer("У вас нет активных аренд.")
+                await callback.answer("У вас нет активных аренд", show_alert=True)
                 return
-        lines = ["Ваши аренды:"]
+        
+        lines = ["📋 Ваши аренды:\n"]
         for r in rentals:
                 lines.append(f"• {r['number']} — до {_format_until(r['until'])}")
-        lines.append("\nЧтобы продлить: ответьте командой, напр. /extend +888 123 4567 3")
-        await message.answer("\n".join(lines))
+        lines.append("\n💡 Чтобы продлить: /extend <номер> <месяцев>")
+        
+        await callback.message.edit_text("\n".join(lines))
+        await callback.answer()
 
 
 @router.message(Command("extend"))

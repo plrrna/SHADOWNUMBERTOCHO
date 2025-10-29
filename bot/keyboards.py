@@ -4,7 +4,7 @@ from .prices import get_price
 
 MAIN_KB = ReplyKeyboardMarkup(
         keyboard=[
-                [KeyboardButton(text="📱 Номера"), KeyboardButton(text="🧾 Мои аренды")],
+                [KeyboardButton(text="📱 Номера"), KeyboardButton(text="👤 Профиль")],
                 [KeyboardButton(text="ℹ️ Помощь")],
         ],
         resize_keyboard=True,
@@ -45,9 +45,20 @@ def payment_keyboard(payment_id: str) -> InlineKeyboardMarkup:
         ])
 
 
-def skip_promo_keyboard() -> InlineKeyboardMarkup:
+def promo_choice_keyboard() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[
                 [
+                        InlineKeyboardButton(text="🎁 Ввести промокод", callback_data="enter_promo")
+                ],
+                [
                         InlineKeyboardButton(text="❌ Пропустить", callback_data="skip_promo")
+                ]
+        ])
+
+
+def profile_keyboard() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[
+                [
+                        InlineKeyboardButton(text="📋 Мои аренды", callback_data="my_rentals")
                 ]
         ])
