@@ -39,9 +39,12 @@ def _save_state(state: Dict) -> None:
                 json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def list_numbers() -> List[Dict]:
+def list_numbers(category: Optional[str] = None) -> List[Dict]:
         state = _load_state()
-        return state["numbers"]
+        numbers = state["numbers"]
+        if category:
+                return [n for n in numbers if n.get("category") == category]
+        return numbers
 
 
 def get_number(number: str) -> Optional[Dict]:

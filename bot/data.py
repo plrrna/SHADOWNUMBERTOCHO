@@ -1,17 +1,34 @@
 from typing import List, Dict
+import random
 
-# Seeded numbers from user with initial status
+# Seeded numbers with categories: 'esim' or 'physical'
 # status: 'busy' or 'free'
-SEEDED_NUMBERS: List[Dict[str, str]] = [
-	{"number": "+888 0258 9924", "status": "busy"},
-	{"number": "+888 123 4567", "status": "free"},
-	{"number": "+888 987 6543", "status": "free"},
-	{"number": "+888 246 8013", "status": "free"},
-	{"number": "+888 135 7924", "status": "busy"},
-	{"number": "+888 369 1215", "status": "free"},
-	{"number": "+888 741 8529", "status": "free"},
-	{"number": "+888 852 9630", "status": "free"},
-	{"number": "+888 963 0741", "status": "free"},
-	{"number": "+888 456 7890", "status": "free"},
-	{"number": "+888 654 3210", "status": "busy"},
-]
+# price: price per month in USD
+SEEDED_NUMBERS: List[Dict[str, str]] = []
+
+# Generate eSIM numbers (10-23 units, price $10-$30)
+esim_count = random.randint(10, 23)
+for i in range(esim_count):
+        price = random.randint(10, 30)
+        SEEDED_NUMBERS.append({
+                "number": f"+888 eSIM {1000 + i:04d}",
+                "status": "free",
+                "category": "esim",
+                "price": price
+        })
+
+# Generate Physical numbers (10-23 units, price $4-$10)
+physical_count = random.randint(10, 23)
+for i in range(physical_count):
+        price = random.randint(4, 10)
+        SEEDED_NUMBERS.append({
+                "number": f"+888 PHYS {2000 + i:04d}",
+                "status": "free",
+                "category": "physical",
+                "price": price
+        })
+
+# Mark some as busy randomly
+for num in SEEDED_NUMBERS:
+        if random.random() < 0.2:  # 20% chance to be busy
+                num["status"] = "busy"

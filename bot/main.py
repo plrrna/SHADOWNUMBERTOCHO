@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery
 # removed config import to avoid .env RuntimeError
-from .keyboards import MAIN_KB, numbers_inline_keyboard, durations_keyboard, RED_CIRCLE, GREEN_CIRCLE, payment_keyboard, promo_choice_keyboard, profile_keyboard
+from .keyboards import MAIN_KB, numbers_inline_keyboard, durations_keyboard, RED_CIRCLE, GREEN_CIRCLE, payment_keyboard, promo_choice_keyboard, profile_keyboard, category_keyboard
 from . import storage
 from .prices import PRICES
 from .crypto import CryptoPay
@@ -72,8 +72,24 @@ async def help_cmd(message: Message):
 
 @router.message(F.text == "📱 Номера")
 async def list_numbers(message: Message):
-        numbers = storage.list_numbers()
-        await message.answer("Выберите номер:", reply_markup=numbers_inline_keyboard(numbers))
+        await message.answer("Выберите категорию номеров:", reply_markup=category_keyboard())
+
+
+@router.callback_query(F.data.startswith("cat:"))
+async def select_category(callback: CallbackQuery):
+        category = callback.data.split(":", 1)[1]
+        numbers = storage.list_numbers(category=category)
+        
+        category_name = "eSIM" if category == "esim" else "Физические номера"
+        if not numbers:
+                await callback.answer(f"В категории '{category_name}' пока нет номеров", show_alert=True)
+                return
+        
+        await callback.message.edit_text(
+                f"📱 {category_name}\n\nВыберите номер:",
+                reply_markup=numbers_inline_keyboard(numbers)
+        )
+        await callback.answer()
 
 
 @router.callback_query(F.data.startswith("num:"))
@@ -90,9 +106,13 @@ async def pick_number(callback: CallbackQuery):
                 )
                 await callback.answer()
                 return
+        
+        monthly_price = item.get("price", 25)
         await callback.message.edit_text(
-                f"Вы выбрали {GREEN_CIRCLE} {number}. Выберите срок аренды:",
-                reply_markup=durations_keyboard(number),
+                f"Вы выбрали {GREEN_CIRCLE} {number}\n"
+                f"Цена: ${monthly_price}/мес\n\n"
+                "Выберите срок аренды:",
+                reply_markup=durations_keyboard(number, monthly_price),
         )
         await callback.answer()
 
@@ -101,22 +121,28 @@ async def pick_number(callback: CallbackQuery):
 async def rent_duration(callback: CallbackQuery):
         _, months_str, number = callback.data.split(":", 2)
         months = int(months_str)
-        price = PRICES.get(months)
-        if not price:
-                await callback.answer("Неверный срок", show_alert=True)
+        
+        # Get number info to retrieve individual price
+        num_info = storage.get_number(number)
+        if not num_info:
+                await callback.answer("Номер не найден", show_alert=True)
                 return
+        
+        # Calculate price: monthly price * months
+        monthly_price = num_info.get("price", PRICES.get(1, 25))
+        total_price = monthly_price * months
         
         # Save pending state for promo code entry
         pending_promo_state[callback.from_user.id] = {
                 "number": number,
                 "months": months,
-                "price": price,
+                "price": total_price,
         }
         
         # Ask for promo code
         await callback.message.edit_text(
                 f"Вы выбрали номер {number} на {months} мес.\n"
-                f"Цена: ${price}\n\n"
+                f"Цена: ${total_price} (${monthly_price}/мес)\n\n"
                 "🎁 Хотите использовать промокод для получения скидки?",
                 reply_markup=promo_choice_keyboard(),
         )
@@ -480,7 +506,8 @@ async def main():
         dp = Dispatcher()
         dp.include_router(router)
         asyncio.create_task(expiry_worker())
-        await dp.start_polling(bot)
+        # Drop pending updates to avoid conflicts with other instances
+        await dp.start_polling(bot, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
